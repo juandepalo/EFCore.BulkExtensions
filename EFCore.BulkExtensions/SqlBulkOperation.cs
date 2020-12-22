@@ -3,6 +3,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using MySql.Data.MySqlClient;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -191,6 +192,36 @@ namespace EFCore.BulkExtensions
                     }
                 }
             }
+            // -- MySQL --
+            else if (providerName.EndsWith("MySql"))
+            {
+                var connection = await OpenAndGetMySqlConnectionAsync(context, tableInfo.BulkConfig, cancellationToken).ConfigureAwait(false);
+                var transaction = tableInfo.BulkConfig.MySqlTransaction ?? connection.BeginTransaction();
+                try
+                {
+                    var command = GetMySqlCommand(context, entities, tableInfo, connection, transaction);
+
+                    var typeAccessor = TypeAccessor.Create(typeof(T), true);
+                    int rowsCopied = 0;
+                    foreach (var item in entities)
+                    {
+                        LoadMySqlValues(tableInfo, typeAccessor, item, command);
+                        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                        SetProgress(ref rowsCopied, entities.Count, tableInfo.BulkConfig, progress);
+                    }
+                }
+                finally
+                {
+                    if (tableInfo.BulkConfig.MySqlTransaction == null)
+                    {
+                        transaction.Commit();
+                        transaction.Dispose();
+                    }
+                    if (tableInfo.BulkConfig.MySqlConnection == null)
+                        connection.Close();
+                }
+
+            }
             // -- SQLite --
             else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
             {
@@ -306,7 +337,7 @@ namespace EFCore.BulkExtensions
                         int lastRowId = (int)lastRowIdScalar;
                         var accessor = TypeAccessor.Create(typeof(T), true);
                         string identityPropertyName = tableInfo.PropertyColumnNamesDict.SingleOrDefault(a => a.Value == tableInfo.IdentityColumnName).Key;
-                        for (int i = entities.Count -1; i >= 0; i--)
+                        for (int i = entities.Count - 1; i >= 0; i--)
                         {
                             accessor[entities[i], identityPropertyName] = lastRowId;
                             lastRowId--;
@@ -385,6 +416,50 @@ namespace EFCore.BulkExtensions
                     }
                 }
             }
+            // -- MySql --
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
+            {
+                var connection = await OpenAndGetMySqlConnectionAsync(context, tableInfo.BulkConfig, cancellationToken).ConfigureAwait(false);
+                var transaction = tableInfo.BulkConfig.MySqlTransaction ?? connection.BeginTransaction();
+                try
+                {
+                    var command = GetMysqlCommand(context, entities, tableInfo, connection, transaction);
+
+                    var typeAccessor = TypeAccessor.Create(typeof(T), true);
+                    int rowsCopied = 0;
+                    foreach (var item in entities)
+                    {
+                        //INSERT INTO `impuestos`.`Impuestos_Retencion` (`Id`, `Borrado`, `Codigo`, `Descripcion`, `Valor`) VALUES ('adfa', 'asdfa', 'fdadf', 'afdad', 'afadsf');
+                        LoadMySqlValues(tableInfo, typeAccessor, item, command);
+                        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                        SetProgress(ref rowsCopied, entities.Count, tableInfo.BulkConfig, progress);
+                    }
+
+                    if (operationType != OperationType.Delete && tableInfo.BulkConfig.SetOutputIdentity && tableInfo.IdentityColumnName != null)
+                    {
+                        command.CommandText = SqlQueryBuilderMySql.SelectLastInsertRowId();
+                        long lastRowIdScalar = (long)await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                        int lastRowId = (int)lastRowIdScalar;
+                        var accessor = TypeAccessor.Create(typeof(T), true);
+                        string identityPropertyName = tableInfo.PropertyColumnNamesDict.SingleOrDefault(a => a.Value == tableInfo.IdentityColumnName).Key;
+                        for (int i = entities.Count - 1; i >= 0; i--)
+                        {
+                            accessor[entities[i], identityPropertyName] = lastRowId;
+                            lastRowId--;
+                        }
+                    }
+                }
+                finally
+                {
+                    if (tableInfo.BulkConfig.MySqlTransaction == null)
+                    {
+                        transaction.Commit();
+                        transaction.Dispose();
+                    }
+                    if (tableInfo.BulkConfig.MySqlTransaction == null)
+                        connection.Close();
+                }
+            }
             // -- SQLite --
             else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
             {
@@ -406,7 +481,7 @@ namespace EFCore.BulkExtensions
                     if (operationType != OperationType.Delete && tableInfo.BulkConfig.SetOutputIdentity && tableInfo.IdentityColumnName != null)
                     {
                         command.CommandText = SqlQueryBuilderSqlite.SelectLastInsertRowId();
-                        long lastRowIdScalar = (long) await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                        long lastRowIdScalar = (long)await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
                         int lastRowId = (int)lastRowIdScalar;
                         var accessor = TypeAccessor.Create(typeof(T), true);
                         string identityPropertyName = tableInfo.PropertyColumnNamesDict.SingleOrDefault(a => a.Value == tableInfo.IdentityColumnName).Key;
@@ -699,7 +774,7 @@ namespace EFCore.BulkExtensions
                 throw new NotSupportedException("Sqlite supports only UPSERT(analog for MERGE WHEN MATCHED) but does not have functionality to do: 'WHEN NOT MATCHED BY SOURCE THEN DELETE'" +
                                                 "What can be done is to read all Data, find rows that are not is input List, then with those do the BulkDelete.");
             }
-            else if(operationType == OperationType.Update)
+            else if (operationType == OperationType.Update)
             {
                 command.CommandText = SqlQueryBuilderSqlite.UpdateSetTable(tableInfo);
             }
@@ -744,7 +819,6 @@ namespace EFCore.BulkExtensions
             command.Prepare(); // Not Required (check if same efficiency when removed)
             return command;
         }
-
         internal static void LoadSqliteValues<T>(TableInfo tableInfo, TypeAccessor typeAccessor, T entity, SqliteCommand command)
         {
             var PropertyColumnsDict = tableInfo.PropertyColumnNamesDict;
@@ -790,6 +864,174 @@ namespace EFCore.BulkExtensions
         }
         #endregion
 
+
+        #region MySqlData
+        internal static MySqlCommand GetMySqlCommand<T>(DbContext context, IList<T> entities, TableInfo tableInfo, MySqlConnection connection, MySqlTransaction transaction)
+        {
+            MySqlCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+
+            OperationType operationType = tableInfo.BulkConfig.OperationType;
+
+            if (operationType == OperationType.Insert)
+            {
+                command.CommandText = SqlQueryBuilderMySql.InsertIntoTable(tableInfo, OperationType.Insert);
+            }
+            else if (operationType == OperationType.InsertOrUpdate)
+            {
+                command.CommandText = SqlQueryBuilderMySql.InsertIntoTable(tableInfo, OperationType.InsertOrUpdate);
+            }
+            else if (operationType == OperationType.InsertOrUpdateDelete)
+            {
+                throw new NotSupportedException("Sqlite supports only UPSERT(analog for MERGE WHEN MATCHED) but does not have functionality to do: 'WHEN NOT MATCHED BY SOURCE THEN DELETE'" +
+                                                "What can be done is to read all Data, find rows that are not is input List, then with those do the BulkDelete.");
+            }
+            else if (operationType == OperationType.Update)
+            {
+                command.CommandText = SqlQueryBuilderMySql.UpdateSetTable(tableInfo);
+            }
+            else if (operationType == OperationType.Delete)
+            {
+                command.CommandText = SqlQueryBuilderMySql.DeleteFromTable(tableInfo);
+            }
+
+            var type = tableInfo.HasAbstractList ? entities[0].GetType() : typeof(T);
+            var entityType = context.Model.FindEntityType(type);
+            var entityPropertiesDict = entityType.GetProperties().Where(a => tableInfo.PropertyColumnNamesDict.ContainsKey(a.Name)).ToDictionary(a => a.Name, a => a);
+            var properties = type.GetProperties();
+
+            foreach (var property in properties)
+            {
+                if (entityPropertiesDict.ContainsKey(property.Name))
+                {
+                    var propertyEntityType = entityPropertiesDict[property.Name];
+                    string columnName = propertyEntityType.GetColumnName();
+                    var propertyType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+
+                    var parameter = new MySqlParameter($"@{columnName}", propertyType);
+                    command.Parameters.Add(parameter);
+
+
+                    parameter.Direction = ParameterDirection.Input;
+                    command.Parameters.Add(parameter);
+                }
+            }
+
+            var shadowProperties = tableInfo.ShadowProperties;
+            foreach (var shadowProperty in shadowProperties)
+            {
+                var parameter = new MySqlParameter($"@{shadowProperty}", typeof(string));
+                command.Parameters.Add(parameter);
+            }
+
+            command.Prepare(); // Not Required (check if same efficiency when removed)
+            return command;
+        }
+        internal static MySqlCommand GetMysqlCommand<T>(DbContext context, IList<T> entities, TableInfo tableInfo, MySqlConnection connection, MySqlTransaction transaction)
+        {
+            MySqlCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+
+            OperationType operationType = tableInfo.BulkConfig.OperationType;
+
+            if (operationType == OperationType.Insert)
+            {
+                command.CommandText = SqlQueryBuilderMySql.InsertIntoTable(tableInfo, OperationType.Insert);
+            }
+            else if (operationType == OperationType.InsertOrUpdate)
+            {
+                command.CommandText = SqlQueryBuilderMySql.InsertIntoTable(tableInfo, OperationType.InsertOrUpdate);
+            }
+            else if (operationType == OperationType.InsertOrUpdateDelete)
+            {
+                throw new NotSupportedException("Sqlite supports only UPSERT(analog for MERGE WHEN MATCHED) but does not have functionality to do: 'WHEN NOT MATCHED BY SOURCE THEN DELETE'" +
+                                                "What can be done is to read all Data, find rows that are not is input List, then with those do the BulkDelete.");
+            }
+            else if (operationType == OperationType.Update)
+            {
+                command.CommandText = SqlQueryBuilderMySql.UpdateSetTable(tableInfo);
+            }
+            else if (operationType == OperationType.Delete)
+            {
+                command.CommandText = SqlQueryBuilderMySql.DeleteFromTable(tableInfo);
+            }
+
+            var type = tableInfo.HasAbstractList ? entities[0].GetType() : typeof(T);
+            var entityType = context.Model.FindEntityType(type);
+            var entityPropertiesDict = entityType.GetProperties().Where(a => tableInfo.PropertyColumnNamesDict.ContainsKey(a.Name)).ToDictionary(a => a.Name, a => a);
+            var properties = type.GetProperties();
+
+            foreach (var property in properties)
+            {
+                if (entityPropertiesDict.ContainsKey(property.Name))
+                {
+                    var propertyEntityType = entityPropertiesDict[property.Name];
+                    string columnName = propertyEntityType.GetColumnName();
+                    var propertyType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+
+                    var parameter = new MySqlParameter($"@{columnName}", propertyType);
+                    command.Parameters.Add(parameter);
+                }
+            }
+
+            var shadowProperties = tableInfo.ShadowProperties;
+            foreach (var shadowProperty in shadowProperties)
+            {
+                var parameter = new MySqlParameter($"@{shadowProperty}", typeof(string));
+                command.Parameters.Add(parameter);
+            }
+
+            command.Prepare(); // Not Required (check if same efficiency when removed)
+            // TODo:
+            //"INSERT INTO `Impuestos_Impuesto` (``.`Id] = [Id], ``.`Borrado] = [Borrado], ``.`Codigo] = [Codigo], ``.`Descripcion] = [Descripcion], ``.`Recargo] = [Recargo], ``.`Valor] = [Valor]) VALUES (`Id` = Id, `Borrado` = Borrado, `Codigo` = Codigo, `Descripcion` = Descripcion, `Recargo` = Recargo, `Valor` = Valor);"
+            return command;
+        }
+        internal static void LoadMySqlValues<T>(TableInfo tableInfo, TypeAccessor typeAccessor, T entity, MySqlCommand command)
+        {
+            var PropertyColumnsDict = tableInfo.PropertyColumnNamesDict;
+            foreach (var propertyColumn in PropertyColumnsDict)
+            {
+                object value = null;
+                if (!tableInfo.ShadowProperties.Contains(propertyColumn.Key))
+                {
+                    if (propertyColumn.Key.Contains(".")) // ToDo: change IF clause to check for NavigationProperties, optimise, integrate with same code segment from LoadData method
+                    {
+                        var subProperties = propertyColumn.Key.Split('.');
+                        var subPropertiesLevel1 = typeAccessor[entity, subProperties[0]];
+
+                        var propertyType = Nullable.GetUnderlyingType(subPropertiesLevel1.GetType()) ?? subPropertiesLevel1.GetType();
+                        if (!command.Parameters.Contains("@" + propertyColumn.Value))
+                        {
+                            var parameter = new MySqlParameter($"@{propertyColumn.Value}", propertyType);
+                            command.Parameters.Add(parameter);
+                        }
+
+                        if (subPropertiesLevel1 == null)
+                            value = DBNull.Value;
+                        else
+                            value = subPropertiesLevel1.GetType().GetProperty(subProperties[1]).GetValue(subPropertiesLevel1) ?? DBNull.Value;
+                    }
+                    else
+                    {
+                        value = typeAccessor[entity, propertyColumn.Key] ?? DBNull.Value;
+                    }
+                }
+                else // IsShadowProperty
+                {
+                    value = entity.GetType().Name;
+                }
+
+                if (tableInfo.ConvertibleProperties.ContainsKey(propertyColumn.Key))
+                {
+                    value = tableInfo.ConvertibleProperties[propertyColumn.Key].ConvertToProvider.Invoke(value);
+                }
+
+                command.Parameters[$"@{propertyColumn.Value}"].Value = value;
+            }
+        }
+        #endregion
+
+
         #region Connection
         internal static DbConnection OpenAndGetSqlConnection(DbContext context, BulkConfig config)
         {
@@ -830,6 +1072,24 @@ namespace EFCore.BulkExtensions
             }
             return connection;
         }
+        internal static MySqlConnection OpenAndGetMysqlSqliteConnection(DbContext context, BulkConfig bulkConfig)
+        {
+            var connection = bulkConfig.MySqlConnection ?? (MySqlConnection)context.Database.GetDbConnection();
+            if (connection.State != ConnectionState.Open)
+            {
+                connection.Open();
+            }
+            return connection;
+        }
+        internal static async Task<MySqlConnection> OpenAndGetMySqlConnectionAsync(DbContext context, BulkConfig bulkConfig, CancellationToken cancellationToken)
+        {
+            var connection = bulkConfig.MySqlConnection ?? (MySqlConnection)context.Database.GetDbConnection();
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            }
+            return connection;
+        }
 
         private static SqlBulkCopy GetSqlBulkCopy(SqlConnection sqlConnection, IDbContextTransaction transaction, BulkConfig config)
         {
@@ -844,6 +1104,7 @@ namespace EFCore.BulkExtensions
                 return new SqlBulkCopy(sqlConnection, sqlBulkCopyOptions, sqlTransaction);
             }
         }
-        #endregion
+
     }
+    #endregion
 }

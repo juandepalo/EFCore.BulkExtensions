@@ -1,5 +1,6 @@
 ﻿using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
+using MySql.Data.MySqlClient;
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
@@ -41,6 +42,10 @@ namespace EFCore.BulkExtensions
 
         public SqliteConnection SqliteConnection { get; set; }
         public SqliteTransaction SqliteTransaction { get; set; }
+
+
+        public MySqlConnection MySqlConnection { get; set; }
+        public MySqlTransaction MySqlTransaction { get; set; }
 
         public Func<DbConnection, DbConnection> UnderlyingConnection { get; set; }
         public Func<DbTransaction, DbTransaction> UnderlyingTransaction { get; set; }
