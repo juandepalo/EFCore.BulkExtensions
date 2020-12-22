@@ -909,9 +909,6 @@ namespace EFCore.BulkExtensions
                     var propertyType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
 
                     var parameter = new MySqlParameter($"@{columnName}", propertyType);
-                    command.Parameters.Add(parameter);
-
-
                     parameter.Direction = ParameterDirection.Input;
                     command.Parameters.Add(parameter);
                 }
