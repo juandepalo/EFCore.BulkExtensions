@@ -30,7 +30,8 @@ namespace EFCore.BulkExtensions
         InsertOrUpdateDelete,
         Update,
         Delete,
-        Read
+        Read,
+        Truncate
     }
 
     public class SqlProviderNotSupportedException : NotSupportedException
@@ -192,6 +193,35 @@ namespace EFCore.BulkExtensions
                     }
                 }
             }
+            // -- SQLite --
+            else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
+            {
+                var connection = await OpenAndGetSqliteConnectionAsync(context, tableInfo.BulkConfig, cancellationToken).ConfigureAwait(false);
+                var transaction = tableInfo.BulkConfig.SqliteTransaction ?? connection.BeginTransaction();
+                try
+                {
+                    var command = GetSqliteCommand(context, entities, tableInfo, connection, transaction);
+
+                    var typeAccessor = TypeAccessor.Create(typeof(T), true);
+                    int rowsCopied = 0;
+                    foreach (var item in entities)
+                    {
+                        LoadSqliteValues(tableInfo, typeAccessor, item, command);
+                        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                        SetProgress(ref rowsCopied, entities.Count, tableInfo.BulkConfig, progress);
+                    }
+                }
+                finally
+                {
+                    if (tableInfo.BulkConfig.SqliteTransaction == null)
+                    {
+                        transaction.Commit();
+                        transaction.Dispose();
+                    }
+                    if (tableInfo.BulkConfig.SqliteConnection == null)
+                        connection.Close();
+                }
+            }
             // -- MySQL --
             else if (providerName.EndsWith("MySql"))
             {
@@ -221,35 +251,6 @@ namespace EFCore.BulkExtensions
                         connection.Close();
                 }
 
-            }
-            // -- SQLite --
-            else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
-            {
-                var connection = await OpenAndGetSqliteConnectionAsync(context, tableInfo.BulkConfig, cancellationToken).ConfigureAwait(false);
-                var transaction = tableInfo.BulkConfig.SqliteTransaction ?? connection.BeginTransaction();
-                try
-                {
-                    var command = GetSqliteCommand(context, entities, tableInfo, connection, transaction);
-
-                    var typeAccessor = TypeAccessor.Create(typeof(T), true);
-                    int rowsCopied = 0;
-                    foreach (var item in entities)
-                    {
-                        LoadSqliteValues(tableInfo, typeAccessor, item, command);
-                        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                        SetProgress(ref rowsCopied, entities.Count, tableInfo.BulkConfig, progress);
-                    }
-                }
-                finally
-                {
-                    if (tableInfo.BulkConfig.SqliteTransaction == null)
-                    {
-                        transaction.Commit();
-                        transaction.Dispose();
-                    }
-                    if (tableInfo.BulkConfig.SqliteConnection == null)
-                        connection.Close();
-                }
             }
             else
             {
@@ -416,6 +417,49 @@ namespace EFCore.BulkExtensions
                     }
                 }
             }
+            // -- SQLite --
+            else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
+            {
+                var connection = await OpenAndGetSqliteConnectionAsync(context, tableInfo.BulkConfig, cancellationToken).ConfigureAwait(false);
+                var transaction = tableInfo.BulkConfig.SqliteTransaction ?? connection.BeginTransaction();
+                try
+                {
+                    var command = GetSqliteCommand(context, entities, tableInfo, connection, transaction);
+
+                    var typeAccessor = TypeAccessor.Create(typeof(T), true);
+                    int rowsCopied = 0;
+                    foreach (var item in entities)
+                    {
+                        LoadSqliteValues(tableInfo, typeAccessor, item, command);
+                        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                        SetProgress(ref rowsCopied, entities.Count, tableInfo.BulkConfig, progress);
+                    }
+
+                    if (operationType != OperationType.Delete && tableInfo.BulkConfig.SetOutputIdentity && tableInfo.IdentityColumnName != null)
+                    {
+                        command.CommandText = SqlQueryBuilderSqlite.SelectLastInsertRowId();
+                        long lastRowIdScalar = (long)await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                        int lastRowId = (int)lastRowIdScalar;
+                        var accessor = TypeAccessor.Create(typeof(T), true);
+                        string identityPropertyName = tableInfo.PropertyColumnNamesDict.SingleOrDefault(a => a.Value == tableInfo.IdentityColumnName).Key;
+                        for (int i = entities.Count - 1; i >= 0; i--)
+                        {
+                            accessor[entities[i], identityPropertyName] = lastRowId;
+                            lastRowId--;
+                        }
+                    }
+                }
+                finally
+                {
+                    if (tableInfo.BulkConfig.SqliteTransaction == null)
+                    {
+                        transaction.Commit();
+                        transaction.Dispose();
+                    }
+                    if (tableInfo.BulkConfig.SqliteConnection == null)
+                        connection.Close();
+                }
+            }
             // -- MySql --
             else if (providerName.EndsWith(DbServer.MySql.ToString()))
             {
@@ -457,49 +501,6 @@ namespace EFCore.BulkExtensions
                         transaction.Dispose();
                     }
                     if (tableInfo.BulkConfig.MySqlTransaction == null)
-                        connection.Close();
-                }
-            }
-            // -- SQLite --
-            else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
-            {
-                var connection = await OpenAndGetSqliteConnectionAsync(context, tableInfo.BulkConfig, cancellationToken).ConfigureAwait(false);
-                var transaction = tableInfo.BulkConfig.SqliteTransaction ?? connection.BeginTransaction();
-                try
-                {
-                    var command = GetSqliteCommand(context, entities, tableInfo, connection, transaction);
-
-                    var typeAccessor = TypeAccessor.Create(typeof(T), true);
-                    int rowsCopied = 0;
-                    foreach (var item in entities)
-                    {
-                        LoadSqliteValues(tableInfo, typeAccessor, item, command);
-                        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                        SetProgress(ref rowsCopied, entities.Count, tableInfo.BulkConfig, progress);
-                    }
-
-                    if (operationType != OperationType.Delete && tableInfo.BulkConfig.SetOutputIdentity && tableInfo.IdentityColumnName != null)
-                    {
-                        command.CommandText = SqlQueryBuilderSqlite.SelectLastInsertRowId();
-                        long lastRowIdScalar = (long)await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-                        int lastRowId = (int)lastRowIdScalar;
-                        var accessor = TypeAccessor.Create(typeof(T), true);
-                        string identityPropertyName = tableInfo.PropertyColumnNamesDict.SingleOrDefault(a => a.Value == tableInfo.IdentityColumnName).Key;
-                        for (int i = entities.Count - 1; i >= 0; i--)
-                        {
-                            accessor[entities[i], identityPropertyName] = lastRowId;
-                            lastRowId--;
-                        }
-                    }
-                }
-                finally
-                {
-                    if (tableInfo.BulkConfig.SqliteTransaction == null)
-                    {
-                        transaction.Commit();
-                        transaction.Dispose();
-                    }
-                    if (tableInfo.BulkConfig.SqliteConnection == null)
                         connection.Close();
                 }
             }
@@ -561,6 +562,26 @@ namespace EFCore.BulkExtensions
             }
         }
 
+        public static void Truncate(DbContext context, TableInfo tableInfo)
+        {
+            string providerName = context.Database.ProviderName;
+            // -- SQL Server --
+            if (providerName.EndsWith(DbServer.SqlServer.ToString()))
+            {
+                context.Database.ExecuteSqlRaw(SqlQueryBuilder.TruncateTable(tableInfo.FullTableName));
+
+            }
+            // -- Sqlite --
+            else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
+            {
+                context.Database.ExecuteSqlRaw(SqlQueryBuilder.DeleteTable(tableInfo.FullTableName));
+            }
+            else
+            {
+                throw new SqlProviderNotSupportedException(providerName);
+            }
+        }
+
         public static async Task ReadAsync<T>(DbContext context, IList<T> entities, TableInfo tableInfo, Action<decimal> progress, CancellationToken cancellationToken) where T : class
         {
             Dictionary<string, string> previousPropertyColumnNamesDict = tableInfo.ConfigureBulkReadTableInfo(context);
@@ -607,6 +628,26 @@ namespace EFCore.BulkExtensions
             else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
             {
                 throw new NotImplementedException();
+            }
+            else
+            {
+                throw new SqlProviderNotSupportedException(providerName);
+            }
+        }
+
+        public static async Task TruncateAsync(DbContext context, TableInfo tableInfo)
+        {
+            string providerName = context.Database.ProviderName;
+            // -- SQL Server --
+            if (providerName.EndsWith(DbServer.SqlServer.ToString()))
+            {
+                await context.Database.ExecuteSqlRawAsync(SqlQueryBuilder.TruncateTable(tableInfo.FullTableName));
+
+            }
+            // -- Sqlite --
+            else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
+            {
+                context.Database.ExecuteSqlRaw(SqlQueryBuilder.DeleteTable(tableInfo.FullTableName));
             }
             else
             {
@@ -863,8 +904,6 @@ namespace EFCore.BulkExtensions
             }
         }
         #endregion
-
-
         #region MySqlData
         internal static MySqlCommand GetMySqlCommand<T>(DbContext context, IList<T> entities, TableInfo tableInfo, MySqlConnection connection, MySqlTransaction transaction)
         {
