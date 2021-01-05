@@ -64,6 +64,7 @@ namespace EFCore.BulkExtensions
         /// </summary>
         /// <typeparam name="T"></typeparam>
         /// <param name="query"></param>
+        /// <param name="context"></param>
         /// <param name="expression"></param>
         /// <returns></returns>
         public static (string, List<object>) GetSqlUpdate<T>(IQueryable<T> query, DbContext context, Expression<Func<T, T>> expression) where T : class
@@ -191,15 +192,10 @@ namespace EFCore.BulkExtensions
         /// <summary>
         /// Recursive analytic expression 
         /// </summary>
+        /// <param name="columnNameValueDict"></param>
         /// <param name="tableAlias"></param>
         /// <param name="expression"></param>
-        /// <param name="sqlColumns"></param>
-        /// <param name="sqlParameters"></param>
-        /// <summary>
-        /// Recursive analytic expression 
-        /// </summary>
-        /// <param name="tableAlias"></param>
-        /// <param name="expression"></param>
+        /// <param name="dbType"></param>
         /// <param name="sqlColumns"></param>
         /// <param name="sqlParameters"></param>
         public static void CreateUpdateBody(Dictionary<string, string> columnNameValueDict, string tableAlias, Expression expression, DbServer dbType, ref StringBuilder sqlColumns, ref List<object> sqlParameters)

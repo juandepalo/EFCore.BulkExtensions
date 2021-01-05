@@ -130,6 +130,36 @@ namespace EFCore.BulkExtensions
                         connection.Close();
                 }
             }
+            // -- MySql --
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
+
+            {
+                var connection = OpenAndGetMySqlConnection(context, tableInfo.BulkConfig);
+                var transaction = tableInfo.BulkConfig.MySqlTransaction ?? connection.BeginTransaction();
+                try
+                {
+                    var command = GetMySqlCommand(context, entities, tableInfo, connection, transaction);
+
+                    var typeAccessor = TypeAccessor.Create(typeof(T), true);
+                    int rowsCopied = 0;
+                    foreach (var item in entities)
+                    {
+                        LoadMySqlValues(tableInfo, typeAccessor, item, command);
+                        command.ExecuteNonQuery();
+                        SetProgress(ref rowsCopied, entities.Count, tableInfo.BulkConfig, progress);
+                    }
+                }
+                finally
+                {
+                    if (tableInfo.BulkConfig.MySqlTransaction == null)
+                    {
+                        transaction.Commit();
+                        transaction.Dispose();
+                    }
+                    if (tableInfo.BulkConfig.MySqlConnection == null)
+                        connection.Close();
+                }
+            }
             else
             {
                 throw new SqlProviderNotSupportedException(providerName);
@@ -223,7 +253,7 @@ namespace EFCore.BulkExtensions
                 }
             }
             // -- MySQL --
-            else if (providerName.EndsWith("MySql"))
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
             {
                 var connection = await OpenAndGetMySqlConnectionAsync(context, tableInfo.BulkConfig, cancellationToken).ConfigureAwait(false);
                 var transaction = tableInfo.BulkConfig.MySqlTransaction ?? connection.BeginTransaction();
@@ -356,6 +386,50 @@ namespace EFCore.BulkExtensions
                         connection.Close();
                 }
             }
+            // -- MySql --
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
+
+            {
+                var connection = OpenAndGetMySqlConnection(context, tableInfo.BulkConfig);
+                var transaction = tableInfo.BulkConfig.MySqlTransaction ?? connection.BeginTransaction();
+                try
+                {
+                    var command = GetMySqlCommand(context, entities, tableInfo, connection, transaction);
+
+                    var typeAccessor = TypeAccessor.Create(typeof(T), true);
+                    int rowsCopied = 0;
+                    foreach (var item in entities)
+                    {
+                        LoadMySqlValues(tableInfo, typeAccessor, item, command);
+                        command.ExecuteNonQuery();
+                        SetProgress(ref rowsCopied, entities.Count, tableInfo.BulkConfig, progress);
+                    }
+
+                    if (operationType != OperationType.Delete && tableInfo.BulkConfig.SetOutputIdentity && tableInfo.IdentityColumnName != null)
+                    {
+                        command.CommandText = SqlQueryBuilderMySql.SelectLastInsertRowId();
+                        long lastRowIdScalar = (long)command.ExecuteScalar();
+                        int lastRowId = (int)lastRowIdScalar;
+                        var accessor = TypeAccessor.Create(typeof(T), true);
+                        string identityPropertyName = tableInfo.PropertyColumnNamesDict.SingleOrDefault(a => a.Value == tableInfo.IdentityColumnName).Key;
+                        for (int i = entities.Count - 1; i >= 0; i--)
+                        {
+                            accessor[entities[i], identityPropertyName] = lastRowId;
+                            lastRowId--;
+                        }
+                    }
+                }
+                finally
+                {
+                    if (tableInfo.BulkConfig.MySqlTransaction == null)
+                    {
+                        transaction.Commit();
+                        transaction.Dispose();
+                    }
+                    if (tableInfo.BulkConfig.MySqlConnection == null)
+                        connection.Close();
+                }
+            }
             else
             {
                 throw new SqlProviderNotSupportedException(providerName);
@@ -462,6 +536,7 @@ namespace EFCore.BulkExtensions
             }
             // -- MySql --
             else if (providerName.EndsWith(DbServer.MySql.ToString()))
+
             {
                 var connection = await OpenAndGetMySqlConnectionAsync(context, tableInfo.BulkConfig, cancellationToken).ConfigureAwait(false);
                 var transaction = tableInfo.BulkConfig.MySqlTransaction ?? connection.BeginTransaction();
@@ -556,6 +631,16 @@ namespace EFCore.BulkExtensions
             {
                 throw new NotImplementedException();
             }
+            // -- Mysql --
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
+            {
+                throw new NotImplementedException();
+            }
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
+
+            {
+                throw new NotImplementedException();
+            }
             else
             {
                 throw new SqlProviderNotSupportedException(providerName);
@@ -573,6 +658,12 @@ namespace EFCore.BulkExtensions
             }
             // -- Sqlite --
             else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
+            {
+                context.Database.ExecuteSqlRaw(SqlQueryBuilder.DeleteTable(tableInfo.FullTableName));
+            }
+            // -- MySQL--
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
+
             {
                 context.Database.ExecuteSqlRaw(SqlQueryBuilder.DeleteTable(tableInfo.FullTableName));
             }
@@ -629,6 +720,12 @@ namespace EFCore.BulkExtensions
             {
                 throw new NotImplementedException();
             }
+            // -- MySql --
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
+
+            {
+                throw new NotImplementedException();
+            }
             else
             {
                 throw new SqlProviderNotSupportedException(providerName);
@@ -646,6 +743,12 @@ namespace EFCore.BulkExtensions
             }
             // -- Sqlite --
             else if (providerName.EndsWith(DbServer.Sqlite.ToString()))
+            {
+                context.Database.ExecuteSqlRaw(SqlQueryBuilder.DeleteTable(tableInfo.FullTableName));
+            }
+            // -- MySql --
+            else if (providerName.EndsWith(DbServer.MySql.ToString()))
+
             {
                 context.Database.ExecuteSqlRaw(SqlQueryBuilder.DeleteTable(tableInfo.FullTableName));
             }
@@ -1108,7 +1211,7 @@ namespace EFCore.BulkExtensions
             }
             return connection;
         }
-        internal static MySqlConnection OpenAndGetMysqlSqliteConnection(DbContext context, BulkConfig bulkConfig)
+        internal static MySqlConnection OpenAndGetMySqlConnection(DbContext context, BulkConfig bulkConfig)
         {
             var connection = bulkConfig.MySqlConnection ?? (MySqlConnection)context.Database.GetDbConnection();
             if (connection.State != ConnectionState.Open)
